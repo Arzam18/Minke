@@ -24,8 +24,12 @@ jobs:
 
       - name: Patch Source Files and Makefile
         run: |
-          # Fix Makefile architecture probe to use the host compiler instead of the cross-compiler
-          sed -i 's/\$(CXX) -march=native/c++ -march=native/g' Makefile
+          # Fix makefile architecture probe to use the host compiler instead of the cross-compiler
+          if [ -f "makefile" ]; then
+            sed -i 's/\$(CXX) -march=native/c++ -march=native/g' makefile
+          elif [ -f "Makefile" ]; then
+            sed -i 's/\$(CXX) -march=native/c++ -march=native/g' Makefile
+          fi
 
           # Ensure all source files using stringstream explicitly include <sstream> (fixes Clang/libc++ missing transitive headers)
           for f in $(find src -name "*.cpp"); do
