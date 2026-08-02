@@ -22,6 +22,19 @@ jobs:
         with:
           ndk-version: r26b
 
+      - name: Patch Source Files and Makefile
+        run: |
+          # Fix Makefile architecture probe to use the host compiler instead of the cross-compiler
+          sed -i 's/\$(CXX) -march=native/c++ -march=native/g' Makefile
+
+          # Ensure all source files using stringstream explicitly include <sstream> (fixes Clang/libc++ missing transitive headers)
+          for f in $(find src -name "*.cpp"); do
+            if grep -q "stringstream" "$f" && ! grep -q "#include <sstream>" "$f"; then
+              echo "Adding #include <sstream> to $f"
+              sed -i '1i #include <sstream>' "$f"
+            fi
+          done
+
       - name: Build Minke for Android ARM64
         run: |
           TOOLCHAIN=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin
