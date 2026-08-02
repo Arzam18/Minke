@@ -1,0 +1,40 @@
+name: Minke Android Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build Minke for Android (ARM64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
+      - name: Build Minke for Android ARM64
+        run: |
+          TOOLCHAIN=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin
+          make \
+            CXX=$TOOLCHAIN/aarch64-linux-android29-clang++ \
+            ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
+            BUILD_DIR=build/android \
+            EXE=build/minke \
+            build
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minke-Android-arm64
+          path: build/minke
+          retention-days: 7
