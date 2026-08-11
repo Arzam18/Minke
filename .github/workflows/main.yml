@@ -1,59 +1,15 @@
-name: Minke Android Build
-
-on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
-
-jobs:
-  build-android:
-    name: Build Minke for Android (ARM64)
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r26b
-
       - name: Patch Source Files and Makefile
         run: |
-          # Use Python to patch the makefile specifically for preprocess_nnue so it builds with the host compiler (c++) 
-          # instead of the Android cross-compiler, allowing it to execute successfully on the x86_64 runner.
-          python3 -c '
-          for mf in ["makefile", "Makefile"]:
-              try:
-                  with open(mf, "r") as f:
-                      lines = f.readlines()
-                  new_lines = []
-                  in_rule = False
-                  for line in lines:
-                      if line.startswith("preprocess_nnue"):
-                          in_rule = True
-                      elif in_rule and (line.startswith("\t") or line.startswith("    ")):
-                          line = line.replace("$(CXX)", "c++")
-                      elif in_rule and not line.strip():
-                          in_rule = False
-                      new_lines.append(line)
-                  
-                  with open(mf, "w") as f:
-                      f.writelines(new_lines)
-                  print(f"Successfully patched {mf}")
-                  break
-              except FileNotFoundError:
-                  continue
-          '
+          # 1. Remove -march=native from all Makefiles (it breaks cross-compilation)
+          sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
 
-          # Ensure all source files using stringstream explicitly include <sstream> (fixes Clang/libc++ missing transitive headers)
+          # 2. Force the preprocess_nnue tool to use 'c++' (host compiler) instead of $(CXX)
+          # We look for the line that builds preprocess_nnue and swap the compiler variable
+          sed -i '/preprocess_nnue:/,/$(CXX)/ s/$(CXX)/c++/g' Makefile makefile 2>/dev/null || true
+
+          # 3. Ensure all source files using stringstream explicitly include <sstream>
           for f in $(find src -name "*.cpp"); do
             if grep -q "stringstream" "$f" && ! grep -q "#include <sstream>" "$f"; then
-              echo "Adding #include <sstream> to $f"
               sed -i '1i #include <sstream>' "$f"
             fi
           done
@@ -61,16 +17,11 @@ jobs:
       - name: Build Minke for Android ARM64
         run: |
           TOOLCHAIN=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin
+          # We explicitly set CXX and override CXXFLAGS to avoid -march=native
           make \
             CXX=$TOOLCHAIN/aarch64-linux-android29-clang++ \
+            CXXFLAGS="-O3 -funroll-loops -march=armv8-a -flto=auto" \
             ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
             BUILD_DIR=build/android \
             EXE=build/minke \
             build
-
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Minke-Android-arm64
-          path: build/minke
-          retention-days: 7
