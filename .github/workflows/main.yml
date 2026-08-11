@@ -27,26 +27,24 @@ jobs:
           # 1. Remove -march=native globally from Makefiles to prevent cross-compilation errors
           sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
 
-          # 2. Use Python to force preprocess_nnue to compile using the host's native g++ and include src paths
+          # 2. Use Python to ensure preprocess_nnue compiles using host g++ and includes -Isrc headers
           python3 -c '
-          import re
-          for filename in ["Makefile", "makefile"]:
+          for fn in ["Makefile", "makefile"]:
               try:
-                  with open(filename, "r") as f:
-                      content = f.read()
+                  with open(fn, "r") as f:
+                      lines = f.readlines()
                   
-                  # Match the preprocess_nnue target block and replace its command with host g++
-                  pattern = r"(preprocess_nnue\s*:[^\n]*\n)([\t\s].*\n)+"
-                  def replace_rule(match):
-                      header = match.group(1)
-                      return header + "\t g++ -std=c++17 -O3 -Isrc tools/preprocess_nnue.cpp -o preprocess_nnue\n"
+                  new_lines = []
+                  for line in lines:
+                      if "preprocess_nnue.cpp" in line:
+                          # Force clean host compilation with g++ and correct include paths
+                          line = "\t g++ -std=c++17 -O3 -Isrc tools/preprocess_nnue.cpp -o preprocess_nnue\n"
+                      new_lines.append(line)
                   
-                  new_content, count = re.subn(pattern, replace_rule, content)
-                  if count > 0:
-                      with open(filename, "w") as f:
-                          f.write(new_content)
-                      print(f"Successfully patched preprocess_nnue in {filename}")
-                      break
+                  with open(fn, "w") as f:
+                      f.writelines(new_lines)
+                  print(f"Successfully patched preprocess_nnue in {fn}")
+                  break
               except FileNotFoundError:
                   continue
           '
