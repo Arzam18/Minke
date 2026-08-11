@@ -27,24 +27,37 @@ jobs:
           # 1. Remove -march=native globally from Makefiles to prevent cross-compilation errors
           sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
 
-          # 2. Safely replace the preprocess_nnue rule using Python (avoids line/tab corruption)
+          # 2. Force the preprocess_nnue recipe to use host g++ and include src headers
           python3 -c '
-          import re
           for fn in ["Makefile", "makefile"]:
               try:
                   with open(fn, "r") as f:
                       content = f.read()
                   
-                  # Remove any existing preprocess_nnue target block completely
-                  content = re.sub(r"preprocess_nnue\s*:[^\n]*(\n[\t ].*)*", "", content)
-                  
-                  # Append a clean, standalone host-compiled rule at the end of the file
-                  new_rule = "\n\npreprocess_nnue: tools/preprocess_nnue.cpp\n\tg++ -std=c++17 -O3 -Isrc tools/preprocess_nnue.cpp -o preprocess_nnue\n"
-                  content += new_rule
+                  lines = content.splitlines()
+                  new_lines = []
+                  capturing = False
+                  for line in lines:
+                      if line.startswith("preprocess_nnue:"):
+                          capturing = True
+                          new_lines.append(line)
+                          continue
+                      if capturing:
+                          if line.startswith("\t") or line.startswith("    "):
+                              # Replace any cross-compiler call with host g++ and add -Isrc
+                              fixed_line = line.replace("$(CXX)", "g++").replace("${CXX}", "g++")
+                              if "g++" in fixed_line and "-Isrc" not in fixed_line:
+                                  fixed_line = fixed_line.replace("g++", "g++ -std=c++17 -Isrc")
+                              new_lines.append(fixed_line)
+                          else:
+                              capturing = False
+                              new_lines.append(line)
+                      else:
+                          new_lines.append(line)
                   
                   with open(fn, "w") as f:
-                      f.write(content)
-                  print(f"Successfully cleaned and re-added preprocess_nnue rule in {fn}")
+                      f.write("\n".join(new_lines) + "\n")
+                  print(f"Successfully patched preprocess_nnue in {fn}")
                   break
               except FileNotFoundError:
                   continue
