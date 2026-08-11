@@ -27,23 +27,24 @@ jobs:
           # 1. Remove -march=native globally from Makefiles to prevent cross-compilation errors
           sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
 
-          # 2. Use Python to ensure preprocess_nnue compiles using host g++ and includes -Isrc headers
+          # 2. Safely replace the preprocess_nnue rule using Python (avoids line/tab corruption)
           python3 -c '
+          import re
           for fn in ["Makefile", "makefile"]:
               try:
                   with open(fn, "r") as f:
-                      lines = f.readlines()
+                      content = f.read()
                   
-                  new_lines = []
-                  for line in lines:
-                      if "preprocess_nnue.cpp" in line:
-                          # Force clean host compilation with g++ and correct include paths
-                          line = "\t g++ -std=c++17 -O3 -Isrc tools/preprocess_nnue.cpp -o preprocess_nnue\n"
-                      new_lines.append(line)
+                  # Remove any existing preprocess_nnue target block completely
+                  content = re.sub(r"preprocess_nnue\s*:[^\n]*(\n[\t ].*)*", "", content)
+                  
+                  # Append a clean, standalone host-compiled rule at the end of the file
+                  new_rule = "\n\npreprocess_nnue: tools/preprocess_nnue.cpp\n\tg++ -std=c++17 -O3 -Isrc tools/preprocess_nnue.cpp -o preprocess_nnue\n"
+                  content += new_rule
                   
                   with open(fn, "w") as f:
-                      f.writelines(new_lines)
-                  print(f"Successfully patched preprocess_nnue in {fn}")
+                      f.write(content)
+                  print(f"Successfully cleaned and re-added preprocess_nnue rule in {fn}")
                   break
               except FileNotFoundError:
                   continue
