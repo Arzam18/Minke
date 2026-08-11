@@ -1,15 +1,39 @@
+name: Minke Android Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build Minke for Android (ARM64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
       - name: Patch Source Files and Makefile
         run: |
-          # 1. Remove -march=native from all Makefiles (it breaks cross-compilation)
+          # 1. Remove -march=native globally from Makefiles to prevent cross-compilation errors
           sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
 
-          # 2. Force the preprocess_nnue tool to use 'c++' (host compiler) instead of $(CXX)
-          # We look for the line that builds preprocess_nnue and swap the compiler variable
+          # 2. Force the preprocess_nnue tool rule to use the host compiler ('c++') instead of $(CXX)
           sed -i '/preprocess_nnue:/,/$(CXX)/ s/$(CXX)/c++/g' Makefile makefile 2>/dev/null || true
 
           # 3. Ensure all source files using stringstream explicitly include <sstream>
           for f in $(find src -name "*.cpp"); do
             if grep -q "stringstream" "$f" && ! grep -q "#include <sstream>" "$f"; then
+              echo "Adding #include <sstream> to $f"
               sed -i '1i #include <sstream>' "$f"
             fi
           done
@@ -17,7 +41,6 @@
       - name: Build Minke for Android ARM64
         run: |
           TOOLCHAIN=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin
-          # We explicitly set CXX and override CXXFLAGS to avoid -march=native
           make \
             CXX=$TOOLCHAIN/aarch64-linux-android29-clang++ \
             CXXFLAGS="-O3 -funroll-loops -march=armv8-a -flto=auto" \
@@ -25,3 +48,10 @@
             BUILD_DIR=build/android \
             EXE=build/minke \
             build
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minke-Android-arm64
+          path: build/minke
+          retention-days: 7
