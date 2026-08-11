@@ -27,8 +27,29 @@ jobs:
           # 1. Remove -march=native globally from Makefiles to prevent cross-compilation errors
           sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
 
-          # 2. Force the preprocess_nnue tool rule to use the host compiler ('c++') instead of $(CXX)
-          sed -i '/preprocess_nnue:/,/$(CXX)/ s/$(CXX)/c++/g' Makefile makefile 2>/dev/null || true
+          # 2. Use Python to force preprocess_nnue to compile using the host's native g++ and include src paths
+          python3 -c '
+          import re
+          for filename in ["Makefile", "makefile"]:
+              try:
+                  with open(filename, "r") as f:
+                      content = f.read()
+                  
+                  # Match the preprocess_nnue target block and replace its command with host g++
+                  pattern = r"(preprocess_nnue\s*:[^\n]*\n)([\t\s].*\n)+"
+                  def replace_rule(match):
+                      header = match.group(1)
+                      return header + "\t g++ -std=c++17 -O3 -Isrc tools/preprocess_nnue.cpp -o preprocess_nnue\n"
+                  
+                  new_content, count = re.subn(pattern, replace_rule, content)
+                  if count > 0:
+                      with open(filename, "w") as f:
+                          f.write(new_content)
+                      print(f"Successfully patched preprocess_nnue in {filename}")
+                      break
+              except FileNotFoundError:
+                  continue
+          '
 
           # 3. Ensure all source files using stringstream explicitly include <sstream>
           for f in $(find src -name "*.cpp"); do
