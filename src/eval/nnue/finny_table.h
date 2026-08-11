@@ -20,6 +20,7 @@
 #include <array>
 #include <cstring>
 
+#include "core/bitboard.h"
 #include "core/types.h"
 #include "eval/nnue/accumulator.h"
 #include "eval/nnue/arch.h"
@@ -37,7 +38,8 @@ class FinnyTable {
 
   private:
     struct FinnyTableCache {
-        std::array<Bitboard, 12> bbs; // [piece_type]
+        std::array<Bitboard, 6> pt_bb;    // [piece_type]
+        std::array<Bitboard, 2> color_bb; // [color]
         PovAccumulator pov_accumulator;
 
         FinnyTableCache() { reset(); };

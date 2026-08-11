@@ -29,19 +29,14 @@
 #include "search/search.h"
 #include "uci/tune.h"
 
-inline HistoryType calculate_score(const int depth, const int bonus_mult, const int bonus_offset, const int bonus_max) {
+static inline HistoryType calculate_score(const int depth, const int bonus_mult, const int bonus_offset,
+                                          const int bonus_max) {
     return std::min(depth * bonus_mult + bonus_offset, bonus_max);
-}
-
-inline void update_score(HistoryType *value, const int bonus) {
-    *value += bonus - *value * std::abs(bonus) / HISTORY_DIVISOR;
 }
 
 static inline size_t cont_hist_idx(const PieceMove &pmove) {
     return (static_cast<size_t>(pmove.piece) << 6) | static_cast<size_t>(pmove.move.to());
 };
-
-History::History() { reset(); }
 
 void History::reset() {
     std::memset(m_capture_history, 0, sizeof(m_capture_history));
@@ -52,13 +47,10 @@ void History::reset() {
         moves[0] = Move::none();
         moves[1] = Move::none();
     }
-    for (Move &move : m_counter_moves) {
-        move = Move::none();
-    }
 };
 
-HistoryType History::get_history(const ThreadData &td, const Move &move) const {
-    PieceMove pmove = {move, td.position.consult(move.from())};
+int History::get_history(const ThreadData &td, const Move &move) const {
+    PieceMove pmove = {move, td.position.piece_at(move.from())};
     return get_history_heuristic_score(td.position, move) + get_continuation_history_score(td, pmove);
 }
 
@@ -74,8 +66,6 @@ void History::update_history(const ThreadData &td, const Move &best_move, int de
         calculate_score(depth, capt_hist_penalty_mult(), capt_hist_penalty_offset(), capt_hist_penalty_max());
     if (best_move.is_quiet()) {
         save_killer(best_move, td.height);
-        if (td.height > 0)
-            save_counter(td.nodes[td.height - 1].curr_pmove.move, best_move);
 
         // Increase the score of the move that caused the beta cutoff
         update_history_heuristic_score(td.position, best_move, quiet_bonus);
@@ -100,45 +90,44 @@ void History::update_history(const ThreadData &td, const Move &best_move, int de
 
 void History::update_capture_history_score(const Position &position, const Move &move, int bonus) {
     Square to = move.to();
-    PieceType moved_pt = get_piece_type(position.consult(move.from()));
-    PieceType captured_pt = get_piece_type(position.consult(to));
+    PieceType moved_pt = get_piece_type(position.piece_at(move.from()));
+    PieceType captured_pt = get_piece_type(position.piece_at(to));
     if (captured_pt == NONE)
         captured_pt = PAWN;
-    HistoryType *ptr = &m_capture_history[position.get_stm()][moved_pt][to][captured_pt][position.is_threatened(to)];
-    update_score(ptr, bonus);
+    m_capture_history[position.stm()][moved_pt][to][captured_pt][position.is_threatened(to)].update_score(bonus);
 }
 
 void History::update_history_heuristic_score(const Position &position, const Move &move, int bonus) {
     const bool from_threatened = position.is_threatened(move.from());
     const bool to_threatened = position.is_threatened(move.to());
-    HistoryType *ptr = &m_search_history_table[position.get_stm()][move.from_and_to()][from_threatened][to_threatened];
-    update_score(ptr, bonus);
+    m_search_history_table[position.stm()][move.from_and_to()][from_threatened][to_threatened].update_score(bonus);
 }
 
 void History::update_continuation_history_table(const ThreadData &td, const PieceMove &pmove, int bonus) {
-    update_continuation_history_score(td, pmove, bonus, 1); // Counter Moves History (1-ply)
-    update_continuation_history_score(td, pmove, bonus, 2); // Follow Up History (2-ply)
-    update_continuation_history_score(td, pmove, bonus, 4); // 4-ply
+    const int base = get_continuation_history_score(td, pmove);
+    update_continuation_history_score(td, pmove, bonus, base, 1); // Counter Moves History (1-ply)
+    update_continuation_history_score(td, pmove, bonus, base, 2); // Follow Up History (2-ply)
+    update_continuation_history_score(td, pmove, bonus, base, 4); // 4-ply
 }
 
-void History::update_continuation_history_score(const ThreadData &td, const PieceMove &pmove, int bonus, int offset) {
+void History::update_continuation_history_score(const ThreadData &td, const PieceMove &pmove, int bonus, int base,
+                                                int offset) {
     int past_node_idx = td.height - offset;
     if (past_node_idx >= 0 && td.nodes[past_node_idx].curr_pmove) {
         const size_t past_conthist_idx = cont_hist_idx(td.nodes[past_node_idx].curr_pmove);
         const size_t curr_conthist_idx = cont_hist_idx(pmove);
-        HistoryType *ptr = &m_continuation_history[past_conthist_idx][curr_conthist_idx];
-        update_score(ptr, bonus);
+        m_continuation_history[past_conthist_idx][curr_conthist_idx].update_with_base(bonus, base);
     }
 }
 
 HistoryType History::get_history_heuristic_score(const Position &position, const Move &move) const {
     const bool from_threatened = position.is_threatened(move.from());
     const bool to_threatened = position.is_threatened(move.to());
-    return m_search_history_table[position.get_stm()][move.from_and_to()][from_threatened][to_threatened];
+    return m_search_history_table[position.stm()][move.from_and_to()][from_threatened][to_threatened].value;
 }
 
-HistoryType History::get_continuation_history_score(const ThreadData &td, const PieceMove &pmove) const {
-    HistoryType conthist = 0;
+int History::get_continuation_history_score(const ThreadData &td, const PieceMove &pmove) const {
+    int conthist = 0;
     conthist += get_continuation_history_entry(td, pmove, 1) * conthist_1ply_weight();
     conthist += get_continuation_history_entry(td, pmove, 2) * conthist_2ply_weight();
     conthist += get_continuation_history_entry(td, pmove, 4) * conthist_4ply_weight();
@@ -153,5 +142,5 @@ HistoryType History::get_continuation_history_entry(const ThreadData &td, const 
 
     const size_t past_conthist_idx = cont_hist_idx(td.nodes[past_node_idx].curr_pmove);
     const size_t curr_conthist_idx = cont_hist_idx(pmove);
-    return m_continuation_history[past_conthist_idx][curr_conthist_idx];
+    return m_continuation_history[past_conthist_idx][curr_conthist_idx].value;
 }

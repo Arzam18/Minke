@@ -45,12 +45,6 @@ void MovePicker::init(Move ttmove, ThreadData &td, MovePickerType mp_type, Score
     m_killer1 = m_td->search_history.consult_killer1(m_td->height);
     m_killer2 = m_td->search_history.consult_killer2(m_td->height);
 
-    m_counter = Move::none();
-    if (m_td->height > 0)
-        m_counter = m_td->search_history.consult_counter(m_td->nodes[m_td->height - 1].curr_pmove.move);
-    if (m_counter == m_killer1 || m_counter == m_killer2)
-        m_counter = Move::none();
-
     m_idx = m_end = m_bad_noisy_end = 0;
 }
 
@@ -58,7 +52,8 @@ Move MovePicker::next_move(bool skip_quiets) {
     switch (m_stage) {
         case PICK_TT:
             m_stage = GEN_NOISY;
-            if ((!skip_quiets || m_ttmove.is_noisy()) && m_td->position.is_pseudo_legal(m_ttmove)) {
+            if ((!skip_quiets || m_ttmove.is_noisy()) && m_td->position.is_pseudo_legal(m_ttmove) &&
+                m_td->position.is_legal(m_ttmove)) {
                 return m_ttmove;
             } else {
             }
@@ -147,8 +142,6 @@ void MovePicker::score_quiet_moves() {
             score += mp_killer1_bonus();
         else if (move == m_killer2)
             score += mp_killer2_bonus();
-        else if (move == m_counter)
-            score += mp_counter_bonus();
     }
 }
 
@@ -159,7 +152,7 @@ void MovePicker::score_noisy_moves() {
             if (move.is_ep())
                 return WHITE_PAWN; // color does not matter
             else
-                return m_td->position.consult(move.to());
+                return m_td->position.piece_at(move.to());
         }();
 
         score = 20 * SEE_VALUES[captured] + m_td->search_history.get_capture_history(m_td->position, move);

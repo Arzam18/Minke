@@ -30,6 +30,9 @@ struct ThreadData;
 
 class CorrectionHistory {
   public:
+    CorrectionHistory() = default;
+    ~CorrectionHistory() = default;
+
     void reset();
 
     void update(const ThreadData& td, const int depth, const int diff);
@@ -38,11 +41,11 @@ class CorrectionHistory {
 
   private:
     struct CorrectionEntry {
-        HistoryType value{0};
+        HistoryType value{};
 
         inline void update(const HistoryType bonus) {
-            const HistoryType scaled_bonus = bonus - value * std::abs(bonus) / CORRHIST_MAX;
-            value = std::clamp(value + scaled_bonus, -CORRHIST_MAX, CORRHIST_MAX);
+            const int scaled_bonus = bonus - value * std::abs(bonus) / CORRHIST_MAX;
+            value = std::clamp<int>(value + scaled_bonus, -CORRHIST_MAX, CORRHIST_MAX);
         }
 
         [[nodiscard]] inline operator HistoryType() const { return value; }

@@ -19,7 +19,6 @@
 #include "uci/init.h"
 
 #include <cmath>
-#include <cstdint>
 
 #include "core/attacks.h"
 #include "core/types.h"
@@ -29,26 +28,26 @@
 #include "utils/hash.h"
 #include "utils/incbin.h"
 
-#ifndef EVALFILE
-#define EVALFILE "../src/minke.bin"
-#endif // !EVALFILE
-
 INCBIN(NetParameters, EVALFILE);
 
 int LMR_TABLE[64][64];
 int LMP_TABLE[2][LMP_DEPTH];
 HashKeys hash_keys;
 Network network;
-Bitboard between_squares[64][64];
-Bitboard passing_rays[64][64];
+
+Bitboard inbetween_masks[64][64];
+Bitboard passing_masks[64][64];
+Bitboard diagonal_masks[64];
+Bitboard antidiagonal_masks[64];
 
 void init_all() {
     init_search_params();
     init_network_params();
     init_hash_keys();
     init_magic_attack_tables();
-    init_between_squares();
-    init_passing_rays();
+    init_inbetween_masks();
+    init_passing_masks();
+    init_diagonal_antidiagonal_masks();
 }
 
 void init_search_params() {
@@ -65,67 +64,7 @@ void init_search_params() {
     }
 }
 
-void init_network_params() {
-    const uint8_t* raw_bytes = reinterpret_cast<const uint8_t*>(gNetParametersData);
-
-    // Copy FT weights
-    size_t offset = 0;
-    std::memcpy(network.ft_weights, raw_bytes + offset, sizeof(network.ft_weights));
-    offset += sizeof(network.ft_weights);
-
-    // Copy FT biases
-    std::memcpy(network.ft_biases, raw_bytes + offset, sizeof(network.ft_biases));
-    offset += sizeof(network.ft_biases);
-
-    // Transform raw l1_weights, bullet output (transposed: (output_buckets * l2_size) x l1_size) into VNNI layout
-    const int8_t* raw_l1 = reinterpret_cast<const int8_t*>(raw_bytes + offset);
-    for (int l1_idx = 0; l1_idx < L1_SIZE; ++l1_idx) {
-        for (int out_bucket_idx = 0; out_bucket_idx < OUTPUT_BUCKET_COUNT; ++out_bucket_idx) {
-            for (int l2_idx = 0; l2_idx < L2_SIZE; ++l2_idx) {
-                network.l1_weights[out_bucket_idx][l1_idx / 4][l2_idx][l1_idx % 4] =
-                    raw_l1[(out_bucket_idx * L2_SIZE + l2_idx) * L1_SIZE + l1_idx];
-            }
-        }
-    }
-    offset += sizeof(network.l1_weights);
-
-    // Copy L1 biases
-    const int32_t* raw_l1b = reinterpret_cast<const int32_t*>(raw_bytes + offset);
-    for (int out_bucket_idx = 0; out_bucket_idx < OUTPUT_BUCKET_COUNT; ++out_bucket_idx) {
-        for (int l2_idx = 0; l2_idx < L2_SIZE; ++l2_idx) {
-            network.l1_biases[out_bucket_idx][l2_idx] = raw_l1b[out_bucket_idx * L2_SIZE + l2_idx];
-        }
-    }
-    offset += sizeof(network.l1_biases);
-
-    // Transform raw l2_weights, bullet output (transposed: (output_buckets * l3_size) x l2_size)
-    const int32_t* raw_l2 = reinterpret_cast<const int32_t*>(raw_bytes + offset);
-    for (int l2_idx = 0; l2_idx < ACTUAL_L2_SIZE; ++l2_idx) {
-        for (int out_bucket_idx = 0; out_bucket_idx < OUTPUT_BUCKET_COUNT; ++out_bucket_idx) {
-            for (int l3_idx = 0; l3_idx < L3_SIZE; ++l3_idx) {
-                network.l2_weights[out_bucket_idx][l2_idx][l3_idx] =
-                    raw_l2[(out_bucket_idx * L3_SIZE + l3_idx) * ACTUAL_L2_SIZE + l2_idx];
-            }
-        }
-    }
-    offset += sizeof(network.l2_weights);
-
-    // L2 biases
-    std::memcpy(network.l2_biases, raw_bytes + offset, sizeof(network.l2_biases));
-    offset += sizeof(network.l2_biases);
-
-    // Transform raw l3_weights, bullet output (transposed: output_buckets x l3_size)
-    const int32_t* raw_l3 = reinterpret_cast<const int32_t*>(raw_bytes + offset);
-    for (int l3_idx = 0; l3_idx < L3_SIZE; ++l3_idx) {
-        for (int out_bucket_idx = 0; out_bucket_idx < OUTPUT_BUCKET_COUNT; ++out_bucket_idx) {
-            network.l3_weights[out_bucket_idx][l3_idx] = raw_l3[out_bucket_idx * L3_SIZE + l3_idx];
-        }
-    }
-    offset += sizeof(network.l3_weights);
-
-    // L3 biases
-    std::memcpy(network.l3_biases, raw_bytes + offset, sizeof(network.l3_biases));
-}
+void init_network_params() { network = *reinterpret_cast<const Network *>(&gNetParametersData); }
 
 void init_hash_keys() {
     PRNG prng(1070372);
@@ -162,26 +101,26 @@ void init_magic_attack_tables() {
     }
 }
 
-void init_between_squares() {
+void init_inbetween_masks() {
     for (int sqi1 = a1; sqi1 <= h8; ++sqi1) {
         for (int sqi2 = a1; sqi2 <= h8; ++sqi2) {
             Square sq1 = static_cast<Square>(sqi1);
             Square sq2 = static_cast<Square>(sqi2);
-            Bitboard occ1 = (1ULL << sq1);
-            Bitboard occ2 = (1ULL << sq2);
+            Bitboard occ1(sq1);
+            Bitboard occ2(sq2);
             if (get_bishop_attacks(sq1, 0) & occ2) {
-                between_squares[sq1][sq2] = get_bishop_attacks(sq1, occ2) & get_bishop_attacks(sq2, occ1);
+                inbetween_masks[sq1][sq2] = get_bishop_attacks(sq1, occ2) & get_bishop_attacks(sq2, occ1);
             } else if (get_rook_attacks(sq1, 0) & occ2) {
-                between_squares[sq1][sq2] = get_rook_attacks(sq1, occ2) & get_rook_attacks(sq2, occ1);
+                inbetween_masks[sq1][sq2] = get_rook_attacks(sq1, occ2) & get_rook_attacks(sq2, occ1);
             }
         }
     }
 }
 
-void init_passing_rays() {
+void init_passing_masks() {
     for (int src = a1; src <= h8; ++src) {
         Square src_sq = static_cast<Square>(src);
-        Bitboard src_mask = (1ull << src_sq);
+        Bitboard src_mask(src_sq);
 
         Bitboard rook_attack = get_rook_attacks(src_sq, 0);
         Bitboard bishop_attack = get_bishop_attacks(src_sq, 0);
@@ -190,13 +129,33 @@ void init_passing_rays() {
                 continue;
 
             Square to_sq = static_cast<Square>(to);
-            Bitboard to_mask = (1ull << to_sq);
+            Bitboard to_mask(to_sq);
 
             if (rook_attack & to_mask) {
-                passing_rays[src][to] = rook_attack & (get_rook_attacks(to_sq, src_mask) | to_mask);
+                passing_masks[src][to] = rook_attack & (get_rook_attacks(to_sq, src_mask) | to_mask);
             } else if (bishop_attack & to_mask) {
-                passing_rays[src][to] = bishop_attack & (get_bishop_attacks(to_sq, src_mask) | to_mask);
+                passing_masks[src][to] = bishop_attack & (get_bishop_attacks(to_sq, src_mask) | to_mask);
             }
         }
+    }
+}
+
+void init_diagonal_antidiagonal_masks() {
+    for (int sqi = a1; sqi <= h8; ++sqi) {
+        Square sq = static_cast<Square>(sqi);
+
+        Bitboard diag(sq); // south_west to north_east
+        for (Bitboard mask = diag.shift_north_east(); mask; mask = mask.shift_north_east())
+            diag |= mask;
+        for (Bitboard mask = diag.shift_south_west(); mask; mask = mask.shift_south_west())
+            diag |= mask;
+        diagonal_masks[sq] = diag;
+
+        Bitboard antidiag(sq); // north_west to south_east
+        for (Bitboard mask = antidiag.shift_north_west(); mask; mask = mask.shift_north_west())
+            antidiag |= mask;
+        for (Bitboard mask = antidiag.shift_south_east(); mask; mask = mask.shift_south_east())
+            antidiag |= mask;
+        antidiagonal_masks[sq] = antidiag;
     }
 }
