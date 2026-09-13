@@ -19,19 +19,20 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 
 #include "core/move.h"
-#include "core/position.h"
 #include "core/types.h"
 
-class PvList {
-  public:
-    inline Move best_move() const { return m_size > 0 ? m_pv[0] : Move::none(); }
-    void update(Move new_move, const PvList &list);
-    void print(const Position &pos) const;
-    void clear();
+namespace Cuckoo {
 
-  private:
-    std::array<Move, MAX_SEARCH_DEPTH> m_pv;
-    CounterType m_size{0};
-};
+extern std::array<HashType, 8192> keys;
+extern std::array<Move, 8192> moves;
+
+constexpr size_t h1(HashType hash) { return static_cast<size_t>(hash & 0x1FFF); }
+
+constexpr size_t h2(HashType hash) { return static_cast<size_t>((hash >> 16) & 0x1FFF); }
+
+void init();
+
+}; // namespace Cuckoo

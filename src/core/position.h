@@ -38,6 +38,12 @@ struct BoardState {
     Bitboard pins;
     Bitboard castle_rooks;
     Bitboard threats;
+
+    HashType position_hash;
+    HashType pawn_hash;
+    HashType white_non_pawn_hash;
+    HashType black_non_pawn_hash;
+
     void reset() {
         checkers = 0;
         pins = 0;
@@ -48,83 +54,81 @@ struct BoardState {
         en_passant = NO_SQ;
         castle_rooks = 0;
         threats = 0;
+
+        position_hash = 0ull;
+        pawn_hash = 0ull;
+        white_non_pawn_hash = 0ull;
+        black_non_pawn_hash = 0ull;
     }
 };
 
 class Position {
   public:
-    Position();
+    Position() = default;
     ~Position() = default;
 
-    template <bool UPDATE>
     bool set_fen(const std::string &fen);
     std::string get_fen() const;
 
-    template <bool UPDATE>
     void reset();
-    void reset_nnue();
+    inline void chess960(bool c) { m_chess960 = c; }
 
-    template <bool UPDATE>
-    void make_move(const Move &move);
-    template <bool UPDATE>
-    void unmake_move(const Move &move);
+    DirtyPiece make_move(Move move);
+    void unmake_move(Move move);
 
     void make_null_move();
     void unmake_null_move();
 
     inline bool in_check() const { return m_curr_state.checkers != Bitboard::EMPTY; }
-    inline bool is_threatened(const Square &sq) const { return m_curr_state.threats.is_set(sq); }
+    inline bool is_threatened(Square sq) const { return m_curr_state.threats.is_set(sq); }
     inline Bitboard threats_bb() const { return m_curr_state.threats; }
-    bool is_attacked(const Square &sq) const;
-    bool is_legal(const Move &move);
-    bool is_pseudo_legal(const Move &move) const;
-    Bitboard attackers(const Square &sq) const;
+    bool is_attacked(Square sq) const;
+    bool is_legal(Move move);
+    bool is_pseudo_legal(Move move) const;
+    Bitboard attackers(Square sq) const;
 
     inline bool last_was_null() const { return m_curr_state.ply_from_null == 0; }
     inline bool has_non_pawns() const {
         return piece_bb(KNIGHT) || piece_bb(BISHOP) || piece_bb(ROOK) || piece_bb(QUEEN);
     }
-    inline bool is_draw() { return insufficient_material() || repetition() || is_fifty_move_draw(); }
-    inline ScoreType eval() { return m_nnue.eval(*this); }
+    bool has_upcoming_repetition(int ply) const;
+    inline bool is_draw() const { return insufficient_material() || repetition() || is_fifty_move_draw(); }
 
-    int legal_move_amount();
+    std::string move_to_uci(Move move) const;
     void print() const;
 
     inline Bitboard occ_bb() const { return m_occupancies[WHITE] | m_occupancies[BLACK]; }
-    inline Bitboard occ_bb(const Color &color) const {
+    inline Bitboard occ_bb(Color color) const {
         assert(color == WHITE || color == BLACK);
         return m_occupancies[color];
     }
-    inline Bitboard piece_bb(const Piece &piece) const {
+    inline Bitboard piece_bb(Piece piece) const {
         assert(piece >= WHITE_PAWN && piece <= BLACK_KING);
         return m_pieces[piece];
     }
-    inline Bitboard piece_bb(const PieceType &piece_type, const Color &color) const {
+    inline Bitboard piece_bb(PieceType piece_type, Color color) const {
         return piece_bb(static_cast<Piece>(piece_type + color * COLOR_OFFSET));
     }
-    inline Bitboard piece_bb(const PieceType &piece_type) const {
+    inline Bitboard piece_bb(PieceType piece_type) const {
         return m_pieces[piece_type] | m_pieces[piece_type + COLOR_OFFSET];
     }
-    inline Square king_sq(const Color &color) const { return m_pieces[KING + color * COLOR_OFFSET].lsb(); }
+    inline Square king_sq(Color color) const { return m_pieces[KING + color * COLOR_OFFSET].lsb(); }
     inline uint8_t castling_rights() const { return m_curr_state.castling_rights; }
     inline Color stm() const { return m_stm; }
     inline Color nstm() const { return static_cast<Color>(m_stm ^ 1); }
     inline Square ep_sq() const { return m_curr_state.en_passant; }
-    inline HashType hash() const { return m_position_hash; }
-    inline HashType pawn_hash() const { return m_pawn_hash; }
-    inline HashType white_nonpawn_hash() const { return m_white_non_pawn_hash; }
-    inline HashType black_nonpawn_hash() const { return m_black_non_pawn_hash; }
+    inline HashType hash() const { return board_state().position_hash; }
+    inline HashType pawn_hash() const { return board_state().pawn_hash; }
+    inline HashType white_nonpawn_hash() const { return board_state().white_non_pawn_hash; }
+    inline HashType black_nonpawn_hash() const { return board_state().black_non_pawn_hash; }
     inline int game_ply() const { return m_game_clock_ply; }
     inline int halfmove_clock() const { return m_curr_state.fifty_move_ply; }
-    inline int material_count(const Piece &piece) const { return piece_bb(piece).popcount(); }
-    inline int material_count(const PieceType &piece_type, const Color &color) const {
-        return material_count(static_cast<Piece>(piece_type + color * COLOR_OFFSET));
-    }
-    inline int material_count(const PieceType &piece_type) const {
+    inline int piece_count(Piece piece) const { return piece_bb(piece).popcount(); }
+    inline int piece_count(PieceType piece_type) const {
         return (m_pieces[piece_type] | m_pieces[piece_type + COLOR_OFFSET]).popcount();
     }
-    inline int material_count() const { return occ_bb().popcount(); }
-    inline Piece piece_at(const Square &sq) const { return m_board[sq]; }
+    inline int piece_count() const { return occ_bb().popcount(); }
+    inline Piece piece_at(Square sq) const { return m_board[sq]; }
     inline int history_ply() const { return m_history_ply; }
     inline BoardState board_state() const { return m_curr_state; };
     inline Bitboard checkers_bb() const { return m_curr_state.checkers; }
@@ -138,65 +142,53 @@ class Position {
             return;
 
         memmove(m_history_stack, m_history_stack + m_history_ply - 100, sizeof(BoardState) * 100);
-        memmove(m_played_positions, m_played_positions + m_history_ply - 100, sizeof(HashType) * 100);
 
         m_history_ply = 100;
     }
 
-#ifdef TRACK_ACTIVATIONS
-    void write_activation_data();
-#endif
+    std::pair<Square, Square> castling_to_sqs(Square king_from, Square rook_from) const;
 
   private:
-    template <bool UPDATE>
-    void add_piece(const PieceSquare &ps);
-    template <bool UPDATE>
-    void remove_piece(const PieceSquare &ps);
+    void add_piece(PieceSquare ps);
+    void remove_piece(PieceSquare ps);
 
-    template <bool UPDATE>
-    DirtyPiece make_regular(const Move &move);
-    template <bool UPDATE>
-    DirtyPiece make_capture(const Move &move);
-    template <bool UPDATE>
-    DirtyPiece make_castle(const Move &move);
-    template <bool UPDATE>
-    DirtyPiece make_promotion(const Move &move);
-    template <bool UPDATE>
-    DirtyPiece make_en_passant(const Move &move);
+    DirtyPiece make_regular(Move move);
+    DirtyPiece make_capture(Move move);
+    DirtyPiece make_castle(Move move);
+    DirtyPiece make_promotion(Move move);
+    DirtyPiece make_en_passant(Move move);
 
-    void update_castling_rights(const Move &move);
-    void update_aux_bbs();
-    void update_threats();
+    void update_castling_rights(Move move);
+    void calculate_aux_bbs();
+    void calculate_threats_bb();
+    void calculate_hashes();
 
     bool insufficient_material() const;
     bool repetition() const;
-    bool is_fifty_move_draw();
+    bool is_fifty_move_draw() const;
 
-    bool pawn_pseudo_legal(const Square &from, const Square &to, const Move &move) const;
-    bool castling_pseudo_legal(const Square &from, const Square &to, const PieceType &moved_piece_type) const;
+    bool pawn_pseudo_legal(Square from, Square to, Move move) const;
+    bool castling_pseudo_legal(Square from, Square to, PieceType moved_piece_type) const;
 
-    void hash_piece_key(const PieceSquare &ps);
+    void hash_dirty_piece(DirtyPiece dp);
+    void hash_piece_key(PieceSquare ps);
     void hash_castle_key();
     void hash_ep_key();
     void hash_side_key();
 
     inline void change_side() { m_stm = static_cast<Color>(m_stm ^ 1); }
+    inline BoardState &board_state() { return m_curr_state; };
 
     Piece m_board[64];
     Bitboard m_occupancies[2];
     Bitboard m_pieces[12];
 
     Color m_stm;
-    HashType m_position_hash;
-    HashType m_pawn_hash;
-    HashType m_white_non_pawn_hash;
-    HashType m_black_non_pawn_hash;
     int m_game_clock_ply;
 
     int m_history_ply;
     BoardState m_curr_state;
     BoardState m_history_stack[MAX_PLY];
-    HashType m_played_positions[MAX_PLY];
 
-    NNUE m_nnue;
+    bool m_chess960{false};
 };

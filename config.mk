@@ -1,0 +1,2 @@
+VERSION := 7.0.3
+DEFAULT_EVALFILE := minke41

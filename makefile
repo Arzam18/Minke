@@ -3,23 +3,21 @@
 #   make PGO=on bmi2                                # two-phase profile-guided build
 #   make EVALFILE=net.nnue bmi2                     # use a custom network file
 
-VERSION := 6.0.0
-DEFAULT_EVALFILE := minke37
-PREPROCESSOR_SRC := tools/preprocess_nnue.cpp
+include config.mk
 
 PGO ?= off
 
 # Flags
 CXXSTD := -std=c++20
 CXXWARNS := -Wall
-CXXFLAGS = -O3 -funroll-loops -flto=auto -I src -DNDEBUG -DEVALFILE=\"$(NNUE_FILE_PROCESSED)\" $(CXXSTD) $(CXXWARNS)
+CXXFLAGS = -O3 -funroll-loops -flto=auto -I src -DNDEBUG -DVERSION=\"$(VERSION)\" -DEVALFILE=\"$(NNUE_FILE_PROCESSED)\" $(CXXSTD) $(CXXWARNS)
 LDFLAGS := -flto=auto
 
 # Arch flags
 NATIVE_FLAGS := -march=native
 AVX2_FLAGS := -DUSE_AVX2 -DUSE_SIMD -mavx2 -mbmi -mfma
 BMI2_FLAGS := -DUSE_AVX2 -DUSE_SIMD -mavx2 -mbmi -mbmi2 -mfma
-AVX512_FLAGS := -DUSE_AVX512 -DUSE_SIMD -mavx512f -mavx512bw -mfma
+AVX512_FLAGS := -DUSE_AVX512 -DUSE_SIMD -mavx512f -mavx512bw -mavx512vbmi2 -mfma
 APPLESILICON_FLAGS := -DUSE_NEON -DUSE_SIMD -march=armv8.5-a
 
 # Paths
@@ -28,6 +26,7 @@ PGO_DIR := $(BASE_BUILD_DIR)/pgo
 SRC_DIRS := src/ src/core/ src/datagen/ src/eval/ src/eval/nnue/ src/eval/nnue/simd/ src/search/ src/uci/ src/utils/
 SOURCES := $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.cpp))
 OBJECTS := $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(notdir $(SOURCES)))
+PREPROCESSOR_SRC := tools/preprocess_nnue.cpp
 
 ifndef EXE
 	EXE := minke-v$(VERSION)

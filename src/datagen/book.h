@@ -18,30 +18,18 @@
 
 #pragma once
 
-#include "core/types.h"
+#include <cstddef>
+#include <filesystem>
+#include <string>
+#include <vector>
 
-struct ThreadData;
-
-class TimeManager {
+class EpdBook {
   public:
-    TimeManager();
-    ~TimeManager() = default;
+    EpdBook();
+    EpdBook(const std::filesystem::path& path);
 
-    void reset(CounterType inc, CounterType time, CounterType movestogo, CounterType movetime, bool infinite);
-    void reset();
-    void update(const ThreadData &td, CounterType pv_stability, CounterType score_stability);
-    bool stop_early() const;
-    bool time_over() const;
-    TimeType time_passed() const;
-    void can_stop();
+    inline const std::string& opening(size_t rand_idx) const { return m_book[rand_idx % m_book.size()]; }
 
   private:
-    TimeType m_start_time;
-    TimeType m_optimum_time;
-    TimeType m_maximum_time;
-
-    double m_scale;
-    bool m_movetime;
-    bool m_time_set;
-    bool m_can_stop;
+    std::vector<std::string> m_book;
 };

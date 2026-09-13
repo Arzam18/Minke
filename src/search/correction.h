@@ -35,15 +35,15 @@ class CorrectionHistory {
 
     void reset();
 
-    void update(const ThreadData& td, const int depth, const int diff);
+    void update(const ThreadData& td, int depth, int ply, int diff);
 
-    HistoryType correction(const ThreadData& td) const;
+    HistoryType correction(const ThreadData& td, int ply) const;
 
   private:
     struct CorrectionEntry {
         HistoryType value{};
 
-        inline void update(const HistoryType bonus) {
+        inline void update(HistoryType bonus) {
             const int scaled_bonus = bonus - value * std::abs(bonus) / CORRHIST_MAX;
             value = std::clamp<int>(value + scaled_bonus, -CORRHIST_MAX, CORRHIST_MAX);
         }

@@ -18,21 +18,22 @@
 
 #include "eval/nnue/accumulator.h"
 
+#include "core/types.h"
 #include "eval/nnue/pov_accumulator.h"
 
-Accumulator::Accumulator(const Square white_king_sq, const Square black_king_sq, const PovAccumulator &white_pov_acc,
-                         const PovAccumulator &black_pov_acc)
+Accumulator::Accumulator(const PovAccumulator &white_pov_acc, const PovAccumulator &black_pov_acc,
+                         const Square white_king_sq, const Square black_king_sq)
     : m_pov_accumulators{white_pov_acc, black_pov_acc} {
     m_updated[WHITE] = m_updated[BLACK] = true;
     m_king_sqs[WHITE] = white_king_sq;
     m_king_sqs[BLACK] = black_king_sq;
 }
 
-Accumulator::Accumulator(const DirtyPiece &dp, const Square white_king_sq, const Square black_king_sq) {
+Accumulator::Accumulator(const DirtyPiece dp, const Square white_king_sq, const Square black_king_sq) {
     init(dp, white_king_sq, black_king_sq);
 }
 
-void Accumulator::init(const DirtyPiece &dp, const Square white_king_sq, const Square black_king_sq) {
+void Accumulator::init(const DirtyPiece dp, const Square white_king_sq, const Square black_king_sq) {
     m_updated[WHITE] = m_updated[BLACK] = false;
 
     m_king_sqs[WHITE] = white_king_sq;
@@ -41,24 +42,24 @@ void Accumulator::init(const DirtyPiece &dp, const Square white_king_sq, const S
     m_dirty_piece = dp;
 }
 
-void Accumulator::update(const Color pov, const PovAccumulator &prev_pov_acc) {
+void Accumulator::update(const PovAccumulator &prev_pov_acc, const Color pov) {
     if (m_updated[pov])
         return;
 
     // clang-format off
     switch (m_dirty_piece.move_type) {
-        case REGULAR:
+        case ADD_SUB:
             m_pov_accumulators[pov].add_sub(prev_pov_acc, 
                                             feature_idx(m_dirty_piece.add0, m_king_sqs[pov], pov),
                                             feature_idx(m_dirty_piece.sub0, m_king_sqs[pov], pov));
             break;
-        case CAPTURE:
+        case ADD_SUB2:
             m_pov_accumulators[pov].add_sub2(prev_pov_acc, 
                                              feature_idx(m_dirty_piece.add0, m_king_sqs[pov], pov),
                                              feature_idx(m_dirty_piece.sub0, m_king_sqs[pov], pov),
                                              feature_idx(m_dirty_piece.sub1, m_king_sqs[pov], pov));
             break;
-        case CASTLING:
+        case ADD2_SUB2:
             m_pov_accumulators[pov].add2_sub2(prev_pov_acc, 
                                               feature_idx(m_dirty_piece.add0, m_king_sqs[pov], pov), 
                                               feature_idx(m_dirty_piece.add1, m_king_sqs[pov], pov),
@@ -79,7 +80,7 @@ bool Accumulator::needs_refresh(const Color pov, const Square new_king_sq) const
            king_bucket_idx(new_king_sq, pov) != king_bucket_idx(m_king_sqs[pov], pov); // King bucket change
 }
 
-void Accumulator::refresh(const Color side, const PovAccumulator &finny_table_neurons) {
+void Accumulator::refresh(const PovAccumulator &finny_table_neurons, const Color side) {
     m_pov_accumulators[side] = finny_table_neurons;
     m_updated[side] = true;
 }
