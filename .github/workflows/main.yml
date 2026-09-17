@@ -1,90 +1,108 @@
-name: Minke Android Build
+name: Build Minke for Android
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   build-android:
-    name: Build Minke for Android (ARM64)
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Locate the Makefile by content rather than assuming its path. PREPROCESSOR_SRC is
+      # a variable name unique to Minke's Makefile.
+      - name: Locate Minke Makefile
+        id: locate-makefile
+        run: |
+          echo "All Makefiles found in repo:"
+          find . -iname "Makefile"
+          echo "---"
+          MAKEFILE_PATH=$(grep -rl "PREPROCESSOR_SRC" --include="Makefile" . | head -n1)
+          if [ -z "$MAKEFILE_PATH" ]; then
+            echo "ERROR: no Makefile containing 'PREPROCESSOR_SRC' was found."
+            exit 1
+          fi
+          echo "Using Makefile: $MAKEFILE_PATH"
+          MAKEFILE_DIR=$(dirname "$MAKEFILE_PATH")
+          echo "makefile_dir=$MAKEFILE_DIR" >> "$GITHUB_OUTPUT"
+
+      # `evalfile_processed` compiles tools/preprocess_nnue.cpp and then EXECUTES it to
+      # permute the network's FT weight layout for the target SIMD width. Unlike Halogen's
+      # verbatim.cpp, this tool's simd.h ties the needed constants (PACKUS_LANE_COUNT etc.)
+      # into the same #if block as real ARM NEON types (uint8x16_t, ...) -- so there's no
+      # way to build a host-runnable-but-NEON-correct version of it by choosing flags; the
+      # permutation is genuinely architecture-specific data. QEMU user-mode emulation lets
+      # the real ARM-compiled tool execute transparently on this x86_64 runner instead.
+      - name: Install QEMU user-mode emulation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          update-binfmts --display qemu-aarch64
 
       - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
         id: setup-ndk
+        uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26b
+          ndk-version: r26d
+          add-to-path: false
 
-      - name: Patch Source Files and Makefile
+      - name: Locate NDK aarch64 clang++
+        id: find-clang
         run: |
-          # 1. Remove -march=native globally from Makefiles to prevent cross-compilation errors
-          sed -i 's/-march=native//g' Makefile makefile 2>/dev/null || true
+          TOOLCHAIN_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "toolchain_bin=$TOOLCHAIN_BIN" >> "$GITHUB_OUTPUT"
+          ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang++"
+          "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-          # 2. Force the preprocess_nnue recipe to use host g++ and include src headers
-          python3 -c '
-          for fn in ["Makefile", "makefile"]:
-              try:
-                  with open(fn, "r") as f:
-                      content = f.read()
-                  
-                  lines = content.splitlines()
-                  new_lines = []
-                  capturing = False
-                  for line in lines:
-                      if line.startswith("preprocess_nnue:"):
-                          capturing = True
-                          new_lines.append(line)
-                          continue
-                      if capturing:
-                          if line.startswith("\t") or line.startswith("    "):
-                              # Replace any cross-compiler call with host g++ and add -Isrc
-                              fixed_line = line.replace("$(CXX)", "g++").replace("${CXX}", "g++")
-                              if "g++" in fixed_line and "-Isrc" not in fixed_line:
-                                  fixed_line = fixed_line.replace("g++", "g++ -std=c++17 -Isrc")
-                              new_lines.append(fixed_line)
-                          else:
-                              capturing = False
-                              new_lines.append(line)
-                      else:
-                          new_lines.append(line)
-                  
-                  with open(fn, "w") as f:
-                      f.write("\n".join(new_lines) + "\n")
-                  print(f"Successfully patched preprocess_nnue in {fn}")
-                  break
-              except FileNotFoundError:
-                  continue
-          '
-
-          # 3. Ensure all source files using stringstream explicitly include <sstream>
-          for f in $(find src -name "*.cpp"); do
-            if grep -q "stringstream" "$f" && ! grep -q "#include <sstream>" "$f"; then
-              echo "Adding #include <sstream> to $f"
-              sed -i '1i #include <sstream>' "$f"
-            fi
-          done
-
-      - name: Build Minke for Android ARM64
+      # Calling `make build` directly (bypassing the native/avx2/apple-silicon wrapper
+      # targets) so ARCH_FLAGS can be set explicitly: armv8-a rather than apple-silicon's
+      # hardcoded armv8.5-a, which is too new an ISA level for a lot of real Android
+      # devices. LDFLAGS is a plain `=`/`+=` assignment (no `override`), so a command-line
+      # value replaces it entirely -- -flto=auto is included here to not lose that,
+      # alongside -static-pie/-static-libstdc++ so the binary runs standalone under
+      # DroidFish (which cannot set LD_LIBRARY_PATH for a dynamically-linked libc++).
+      - name: Build Minke (arm64, armv8-a)
         run: |
-          TOOLCHAIN=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin
-          make \
-            CXX=$TOOLCHAIN/aarch64-linux-android29-clang++ \
-            CXXFLAGS="-O3 -funroll-loops -march=armv8-a -flto=auto" \
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          make build \
+            CXX="${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
             ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
             BUILD_DIR=build/android \
-            EXE=build/minke \
-            build
+            EXE=minke-android \
+            LDFLAGS="-flto=auto -static-pie -static-libstdc++"
 
-      - name: Upload Build Artifact
+      - name: Confirm binary is PIE and has no shared library dependencies
+        run: |
+          BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android"
+          find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "minke*" -type f
+          file "$BIN"
+          echo "--- ELF header type ---"
+          readelf -h "$BIN" | grep -i type
+          echo "--- Dynamic section (should show no NEEDED entries, esp. no libc++_shared.so) ---"
+          readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Minke-Android-arm64
-          path: build/minke
-          retention-days: 7
+          name: minke-android-arm64
+          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+          if-no-files-found: error
+
+      - name: Create prerelease
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-build-${{ github.run_number }}
+          name: Minke Android build ${{ github.run_number }}
+          prerelease: true
+          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
