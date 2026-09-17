@@ -64,13 +64,14 @@ jobs:
           ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang++"
           "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-      # Calling `make build` directly (bypassing the native/avx2/apple-silicon wrapper
-      # targets) so ARCH_FLAGS can be set explicitly: armv8-a rather than apple-silicon's
-      # hardcoded armv8.5-a, which is too new an ISA level for a lot of real Android
-      # devices. LDFLAGS is a plain `=`/`+=` assignment (no `override`), so a command-line
-      # value replaces it entirely -- -flto=auto is included here to not lose that,
-      # alongside -static-pie/-static-libstdc++ so the binary runs standalone under
-      # DroidFish (which cannot set LD_LIBRARY_PATH for a dynamically-linked libc++).
+      # -static-pie forces fully-static linking, including the C++ unwinder (libunwind.a) --
+      # but Android's static libc does not reliably provide dl_iterate_phdr (only the
+      # dynamic linker does), so fully-static C++ binaries with exception/unwind support can
+      # hit an unresolvable link error here. This is a Bionic limitation, not a flag to tune
+      # around. The standard alternative: link normally (dynamic, but still PIE, which NDK
+      # clang produces by default) and ship libc++_shared.so alongside the binary -- NDK
+      # executables get a $ORIGIN-relative runpath by default specifically so a co-located
+      # shared library is found without needing LD_LIBRARY_PATH.
       - name: Build Minke (arm64, armv8-a)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
@@ -79,23 +80,32 @@ jobs:
             ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
             BUILD_DIR=build/android \
             EXE=minke-android \
-            LDFLAGS="-flto=auto -static-pie -static-libstdc++"
+            LDFLAGS="-flto=auto"
 
-      - name: Confirm binary is PIE and has no shared library dependencies
+      - name: Copy libc++_shared.so alongside the binary
+        id: copy-libcxx
+        run: |
+          LIBCXX=$(find "${{ steps.setup-ndk.outputs.ndk-path }}" -iname "libc++_shared.so" -path "*aarch64*" | head -n1)
+          echo "Found libc++_shared.so at: $LIBCXX"
+          cp "$LIBCXX" "${{ steps.locate-makefile.outputs.makefile_dir }}/"
+
+      - name: Confirm binary is PIE and check its library dependencies
         run: |
           BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android"
           find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "minke*" -type f
           file "$BIN"
-          echo "--- ELF header type ---"
+          echo "--- ELF header type (should be DYN -- a normal PIE executable) ---"
           readelf -h "$BIN" | grep -i type
-          echo "--- Dynamic section (should show no NEEDED entries, esp. no libc++_shared.so) ---"
-          readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
+          echo "--- Dynamic section (libc++_shared.so expected here; confirm RUNPATH includes \$ORIGIN) ---"
+          readelf -d "$BIN"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: minke-android-arm64
-          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+          path: |
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
           if-no-files-found: error
 
       - name: Create prerelease
@@ -105,6 +115,8 @@ jobs:
           tag_name: android-build-${{ github.run_number }}
           name: Minke Android build ${{ github.run_number }}
           prerelease: true
-          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+          files: |
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
