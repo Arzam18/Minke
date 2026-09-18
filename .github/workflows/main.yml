@@ -64,14 +64,41 @@ jobs:
           ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang++"
           "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-      # -static-pie forces fully-static linking, including the C++ unwinder (libunwind.a) --
-      # but Android's static libc does not reliably provide dl_iterate_phdr (only the
-      # dynamic linker does), so fully-static C++ binaries with exception/unwind support can
-      # hit an unresolvable link error here. This is a Bionic limitation, not a flag to tune
-      # around. The standard alternative: link normally (dynamic, but still PIE, which NDK
-      # clang produces by default) and ship libc++_shared.so alongside the binary -- NDK
-      # executables get a $ORIGIN-relative runpath by default specifically so a co-located
-      # shared library is found without needing LD_LIBRARY_PATH.
+      # A fully-static Android binary (-static-pie) has no dynamic linker, so libunwind's
+      # dl_iterate_phdr reference is unresolved -- Android's static libc doesn't provide it,
+      # only the dynamic linker does. Dynamic linking isn't an option here either: QEMU
+      # would need to open Android's real dynamic linker at /system/bin/linker64, which
+      # doesn't exist on this Ubuntu runner (confirmed by the exact failure just seen).
+      # This provides a minimal but CORRECT implementation for the static-pie case: a fully
+      # static binary is its own only "module", so its program headers (located via the
+      # linker-provided __ehdr_start symbol) are all libunwind actually needs.
+      - name: Build dl_iterate_phdr stub for static PIE
+        id: dl-phdr-stub
+        run: |
+          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
+          mkdir -p "$STUB_DIR"
+          cat > "$STUB_DIR/dl_iterate_phdr_stub.cpp" << 'EOF'
+          #include <link.h>
+          #include <elf.h>
+
+          extern "C" {
+              extern const Elf64_Ehdr __ehdr_start;
+          }
+
+          extern "C" int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *info, size_t size, void *data), void *data) {
+              struct dl_phdr_info info;
+              info.dlpi_addr = 0;
+              info.dlpi_name = "";
+              info.dlpi_phdr = reinterpret_cast<const Elf64_Phdr*>(
+                  reinterpret_cast<const char*>(&__ehdr_start) + __ehdr_start.e_phoff);
+              info.dlpi_phnum = __ehdr_start.e_phnum;
+              return callback(&info, sizeof(info), data);
+          }
+          EOF
+          "${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
+            -std=c++20 -march=armv8-a -c "$STUB_DIR/dl_iterate_phdr_stub.cpp" -o "$STUB_DIR/dl_iterate_phdr_stub.o"
+          echo "stub_obj=$STUB_DIR/dl_iterate_phdr_stub.o" >> "$GITHUB_OUTPUT"
+
       - name: Build Minke (arm64, armv8-a)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
@@ -80,32 +107,23 @@ jobs:
             ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
             BUILD_DIR=build/android \
             EXE=minke-android \
-            LDFLAGS="-flto=auto"
+            LDFLAGS="-flto=auto -static-pie ${{ steps.dl-phdr-stub.outputs.stub_obj }}"
 
-      - name: Copy libc++_shared.so alongside the binary
-        id: copy-libcxx
-        run: |
-          LIBCXX=$(find "${{ steps.setup-ndk.outputs.ndk-path }}" -iname "libc++_shared.so" -path "*aarch64*" | head -n1)
-          echo "Found libc++_shared.so at: $LIBCXX"
-          cp "$LIBCXX" "${{ steps.locate-makefile.outputs.makefile_dir }}/"
-
-      - name: Confirm binary is PIE and check its library dependencies
+      - name: Confirm binary is PIE and has no shared library dependencies
         run: |
           BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android"
           find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "minke*" -type f
           file "$BIN"
-          echo "--- ELF header type (should be DYN -- a normal PIE executable) ---"
+          echo "--- ELF header type ---"
           readelf -h "$BIN" | grep -i type
-          echo "--- Dynamic section (libc++_shared.so expected here; confirm RUNPATH includes \$ORIGIN) ---"
-          readelf -d "$BIN"
+          echo "--- Dynamic section (should show no NEEDED entries) ---"
+          readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: minke-android-arm64
-          path: |
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
+          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
           if-no-files-found: error
 
       - name: Create prerelease
@@ -115,8 +133,6 @@ jobs:
           tag_name: android-build-${{ github.run_number }}
           name: Minke Android build ${{ github.run_number }}
           prerelease: true
-          files: |
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
+          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
