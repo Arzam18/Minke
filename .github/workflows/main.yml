@@ -86,7 +86,7 @@ jobs:
           }
 
           extern "C" int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *info, size_t size, void *data), void *data) {
-              struct dl_phdr_info info;
+              struct dl_phdr_info info = {};
               info.dlpi_addr = 0;
               info.dlpi_name = "";
               info.dlpi_phdr = reinterpret_cast<const Elf64_Phdr*>(
