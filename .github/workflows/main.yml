@@ -104,6 +104,7 @@ jobs:
       # preprocess_nnue.cpp's own logic, before spending another round-trip guessing at
       # which one it is.
       - name: Sanity-check static-pie execution under QEMU
+        id: cpp-sanity-check
         continue-on-error: true
         run: |
           STUB_DIR="$RUNNER_TEMP/android-stub-libs"
@@ -116,6 +117,26 @@ jobs:
             "${{ steps.dl-phdr-stub.outputs.stub_obj }}" \
             "$STUB_DIR/hello.cpp" -o "$STUB_DIR/hello"
           "$STUB_DIR/hello"; echo "exit code: $?"
+
+      # preprocess_nnue never runs on a real Android device -- it only executes once,
+      # under QEMU, on this Linux runner, during the build. Android's "must be PIE"
+      # requirement is enforced by Android's own exec(), which doesn't apply here at all.
+      # Testing whether plain -static (a traditional, fixed-address, non-relocatable
+      # binary) avoids whatever self-relocation issue QEMU hit with -static-pie above.
+      - name: Sanity-check plain -static (non-PIE) execution under QEMU
+        id: nopie-sanity-check
+        continue-on-error: true
+        run: |
+          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
+          cat > "$STUB_DIR/hello_nopie.cpp" << 'EOF'
+          #include <cstdio>
+          int main(){ std::printf("hello from static non-PIE\n"); return 42; }
+          EOF
+          "${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
+            -std=c++20 -march=armv8-a -static -no-pie \
+            "${{ steps.dl-phdr-stub.outputs.stub_obj }}" \
+            "$STUB_DIR/hello_nopie.cpp" -o "$STUB_DIR/hello_nopie"
+          "$STUB_DIR/hello_nopie"; echo "exit code: $?"
 
       # Further isolation: a plain C program has no libunwind/libc++abi dependency at all,
       # so it doesn't need our stub and doesn't exercise the C++ exception-handling startup
@@ -148,6 +169,7 @@ jobs:
             LDFLAGS="-flto=auto -static-pie ${{ steps.dl-phdr-stub.outputs.stub_obj }}"
 
       - name: Confirm binary is PIE and has no shared library dependencies
+        if: steps.c-sanity-check.outcome == 'success'
         run: |
           BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android"
           find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "minke*" -type f
@@ -158,6 +180,7 @@ jobs:
           readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
 
       - name: Upload build artifact
+        if: steps.c-sanity-check.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: minke-android-arm64
@@ -165,7 +188,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create prerelease
-        if: success()
+        if: steps.c-sanity-check.outcome == 'success' && success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-build-${{ github.run_number }}
