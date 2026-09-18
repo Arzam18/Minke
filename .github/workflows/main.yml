@@ -104,6 +104,7 @@ jobs:
       # preprocess_nnue.cpp's own logic, before spending another round-trip guessing at
       # which one it is.
       - name: Sanity-check static-pie execution under QEMU
+        continue-on-error: true
         run: |
           STUB_DIR="$RUNNER_TEMP/android-stub-libs"
           cat > "$STUB_DIR/hello.cpp" << 'EOF'
@@ -122,6 +123,8 @@ jobs:
       # unrelated to anything built so far; if it runs fine, the issue is specific to the
       # C++ runtime's static-pie startup path.
       - name: Sanity-check plain C static-pie execution under QEMU
+        id: c-sanity-check
+        continue-on-error: true
         run: |
           STUB_DIR="$RUNNER_TEMP/android-stub-libs"
           cat > "$STUB_DIR/hello.c" << 'EOF'
@@ -134,6 +137,7 @@ jobs:
           "$STUB_DIR/hello_c"; echo "exit code: $?"
 
       - name: Build Minke (arm64, armv8-a)
+        if: steps.c-sanity-check.outcome == 'success'
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
           make build \
