@@ -34,20 +34,51 @@ jobs:
           MAKEFILE_DIR=$(dirname "$MAKEFILE_PATH")
           echo "makefile_dir=$MAKEFILE_DIR" >> "$GITHUB_OUTPUT"
 
-      # `evalfile_processed` compiles tools/preprocess_nnue.cpp and then EXECUTES it to
-      # permute the network's FT weight layout for the target SIMD width. Unlike Halogen's
-      # verbatim.cpp, this tool's simd.h ties the needed constants (PACKUS_LANE_COUNT etc.)
-      # into the same #if block as real ARM NEON types (uint8x16_t, ...) -- so there's no
-      # way to build a host-runnable-but-NEON-correct version of it by choosing flags; the
-      # permutation is genuinely architecture-specific data. QEMU user-mode emulation lets
-      # the real ARM-compiled tool execute transparently on this x86_64 runner instead.
-      - name: Install QEMU user-mode emulation
+      - name: Download the NNUE network
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static binfmt-support
-          echo "--- binfmt_misc entries (authoritative regardless of registration mechanism) ---"
-          ls /proc/sys/fs/binfmt_misc/ | grep -i aarch64 || echo "no aarch64 entry found yet"
-          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "handler not present under that exact name -- will confirm by actually running an ARM binary later in the build"
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          make evalfile
+
+      # preprocess_nnue.cpp only needs two plain compile-time constants from simd.h
+      # (PACKUS_LANE_COUNT, PACKUS_LANE_ORDER) -- it never executes a real NEON
+      # instruction (permute_network_ft_params's only NEON-gated block is dead code
+      # when PACKUS_LANE_COUNT == 1). But the real simd.h unconditionally pulls in
+      # eval/nnue/simd/neon.h, which includes <arm_neon.h> and declares real ARM-only
+      # types -- so it can't be compiled by a host x86_64 compiler at all, regardless of
+      # which -D flags are passed. This stand-in header supplies just the two constants
+      # the tool actually uses, found first via include-path priority (-I placed before
+      # the real src/), so the real simd.h with its ARM types is never reached.
+      - name: Create host-side stand-in simd.h
+        id: host-stub
+        run: |
+          STUB_DIR="$RUNNER_TEMP/host-simd-stub"
+          mkdir -p "$STUB_DIR/eval/nnue"
+          cat > "$STUB_DIR/eval/nnue/simd.h" << 'EOF'
+          #pragma once
+          #include <cstddef>
+          namespace simd {
+          constexpr size_t PACKUS_LANE_COUNT = 1;
+          constexpr size_t PACKUS_LANE_ORDER[2] = {0, 0};
+          }
+          EOF
+          echo "stub_dir=$STUB_DIR" >> "$GITHUB_OUTPUT"
+
+      # Compiled and run entirely on the host (plain Ubuntu g++) -- no QEMU, no Android
+      # toolchain, no static-linking/Bionic concerns at all. Output filename is hardcoded
+      # to match exactly what the NDK cross-compile phase below will look for:
+      # $(basename EVALFILE)_processed_$(DEFAULT_TARGET).nnue, where DEFAULT_TARGET falls
+      # back to "native" whenever $(CXX) doesn't report x86 AVX macros -- true for the NDK
+      # cross-compiler used in the next step, confirmed by earlier build logs.
+      - name: Build and run preprocess_nnue (host-native)
+        run: |
+          cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
+          g++ -O2 -std=c++20 \
+            -I "${{ steps.host-stub.outputs.stub_dir }}" \
+            -I src \
+            -DUSE_SIMD -DUSE_NEON \
+            tools/preprocess_nnue.cpp -o preprocess_nnue
+          ./preprocess_nnue minke41.nnue minke41_processed_native.nnue
+          ls -la minke41_processed_native.nnue
 
       - name: Set up Android NDK
         id: setup-ndk
@@ -64,101 +95,17 @@ jobs:
           ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang++"
           "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-      # A fully-static Android binary (-static-pie) has no dynamic linker, so libunwind's
-      # dl_iterate_phdr reference is unresolved -- Android's static libc doesn't provide it,
-      # only the dynamic linker does. Dynamic linking isn't an option here either: QEMU
-      # would need to open Android's real dynamic linker at /system/bin/linker64, which
-      # doesn't exist on this Ubuntu runner (confirmed by the exact failure just seen).
-      # This provides a minimal but CORRECT implementation for the static-pie case: a fully
-      # static binary is its own only "module", so its program headers (located via the
-      # linker-provided __ehdr_start symbol) are all libunwind actually needs.
-      - name: Build dl_iterate_phdr stub for static PIE
-        id: dl-phdr-stub
-        run: |
-          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
-          mkdir -p "$STUB_DIR"
-          cat > "$STUB_DIR/dl_iterate_phdr_stub.cpp" << 'EOF'
-          #include <link.h>
-          #include <elf.h>
-
-          extern "C" {
-              extern const Elf64_Ehdr __ehdr_start;
-          }
-
-          extern "C" int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *info, size_t size, void *data), void *data) {
-              struct dl_phdr_info info = {};
-              info.dlpi_addr = 0;
-              info.dlpi_name = "";
-              info.dlpi_phdr = reinterpret_cast<const Elf64_Phdr*>(
-                  reinterpret_cast<const char*>(&__ehdr_start) + __ehdr_start.e_phoff);
-              info.dlpi_phnum = __ehdr_start.e_phnum;
-              return callback(&info, sizeof(info), data);
-          }
-          EOF
-          "${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
-            -std=c++20 -march=armv8-a -c "$STUB_DIR/dl_iterate_phdr_stub.cpp" -o "$STUB_DIR/dl_iterate_phdr_stub.o"
-          echo "stub_obj=$STUB_DIR/dl_iterate_phdr_stub.o" >> "$GITHUB_OUTPUT"
-
-      # Isolate whether the segfault is generic (a QEMU static-pie relocation issue, or
-      # something in the stub triggered merely by C++ runtime startup) versus specific to
-      # preprocess_nnue.cpp's own logic, before spending another round-trip guessing at
-      # which one it is.
-      - name: Sanity-check static-pie execution under QEMU
-        id: cpp-sanity-check
-        continue-on-error: true
-        run: |
-          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
-          cat > "$STUB_DIR/hello.cpp" << 'EOF'
-          #include <cstdio>
-          int main(){ std::printf("hello from static-pie\n"); return 42; }
-          EOF
-          "${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
-            -std=c++20 -march=armv8-a -static-pie \
-            "${{ steps.dl-phdr-stub.outputs.stub_obj }}" \
-            "$STUB_DIR/hello.cpp" -o "$STUB_DIR/hello"
-          "$STUB_DIR/hello"; echo "exit code: $?"
-
-      # preprocess_nnue never runs on a real Android device -- it only executes once,
-      # under QEMU, on this Linux runner, during the build. Android's "must be PIE"
-      # requirement is enforced by Android's own exec(), which doesn't apply here at all.
-      # Testing whether plain -static (a traditional, fixed-address, non-relocatable
-      # binary) avoids whatever self-relocation issue QEMU hit with -static-pie above.
-      - name: Sanity-check plain -static (non-PIE) execution under QEMU
-        id: nopie-sanity-check
-        continue-on-error: true
-        run: |
-          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
-          cat > "$STUB_DIR/hello_nopie.cpp" << 'EOF'
-          #include <cstdio>
-          int main(){ std::printf("hello from static non-PIE\n"); return 42; }
-          EOF
-          "${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang++" \
-            -std=c++20 -march=armv8-a -static -no-pie \
-            "${{ steps.dl-phdr-stub.outputs.stub_obj }}" \
-            "$STUB_DIR/hello_nopie.cpp" -o "$STUB_DIR/hello_nopie"
-          "$STUB_DIR/hello_nopie"; echo "exit code: $?"
-
-      # Further isolation: a plain C program has no libunwind/libc++abi dependency at all,
-      # so it doesn't need our stub and doesn't exercise the C++ exception-handling startup
-      # path. If this ALSO segfaults, the issue is QEMU's static-pie handling in general,
-      # unrelated to anything built so far; if it runs fine, the issue is specific to the
-      # C++ runtime's static-pie startup path.
-      - name: Sanity-check plain C static-pie execution under QEMU
-        id: c-sanity-check
-        continue-on-error: true
-        run: |
-          STUB_DIR="$RUNNER_TEMP/android-stub-libs"
-          cat > "$STUB_DIR/hello.c" << 'EOF'
-          #include <stdio.h>
-          int main(){ printf("hello from plain C static-pie\n"); return 42; }
-          EOF
-          "${{ steps.find-clang.outputs.toolchain_bin }}/aarch64-linux-android24-clang" \
-            -march=armv8-a -static-pie \
-            "$STUB_DIR/hello.c" -o "$STUB_DIR/hello_c"
-          "$STUB_DIR/hello_c"; echo "exit code: $?"
-
+      # minke41_processed_native.nnue already exists from the host-native step above, and
+      # the Makefile's evalfile_processed guard (see the patched Makefile) skips
+      # recompiling/rerunning the tool when that file is already present -- so this
+      # invocation goes straight to compiling $(OBJECTS) and linking the real engine with
+      # the NDK cross-compiler, never touching preprocess_nnue.cpp again.
+      #
+      # Linked normally (dynamic, but still PIE, which NDK clang produces by default) --
+      # not -static-pie -- since DroidFish only needs libc++_shared.so bundled alongside
+      # the binary (next step), avoiding the dl_iterate_phdr/static-libunwind issue
+      # entirely for this binary.
       - name: Build Minke (arm64, armv8-a)
-        if: steps.c-sanity-check.outcome == 'success'
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
           make build \
@@ -166,34 +113,46 @@ jobs:
             ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
             BUILD_DIR=build/android \
             EXE=minke-android \
-            LDFLAGS="-flto=auto -static-pie ${{ steps.dl-phdr-stub.outputs.stub_obj }}"
+            LDFLAGS="-flto=auto"
 
-      - name: Confirm binary is PIE and has no shared library dependencies
-        if: steps.c-sanity-check.outcome == 'success'
+      # DroidFish executes the engine directly with no way to set LD_LIBRARY_PATH -- NDK
+      # executables get a $ORIGIN-relative runpath by default specifically so a co-located
+      # shared library is found without it. Both files must be placed in the same
+      # directory on-device.
+      - name: Copy libc++_shared.so alongside the binary
+        run: |
+          LIBCXX=$(find "${{ steps.setup-ndk.outputs.ndk-path }}" -iname "libc++_shared.so" -path "*aarch64*" | head -n1)
+          echo "Found libc++_shared.so at: $LIBCXX"
+          cp "$LIBCXX" "${{ steps.locate-makefile.outputs.makefile_dir }}/"
+
+      - name: Confirm binary is PIE and check its library dependencies
         run: |
           BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android"
           find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "minke*" -type f
           file "$BIN"
-          echo "--- ELF header type ---"
+          echo "--- ELF header type (should be DYN -- a normal PIE executable) ---"
           readelf -h "$BIN" | grep -i type
-          echo "--- Dynamic section (should show no NEEDED entries) ---"
-          readelf -d "$BIN" || echo "readelf reports no dynamic section -- fully static, good"
+          echo "--- Dynamic section (libc++_shared.so expected; confirm RUNPATH includes \$ORIGIN) ---"
+          readelf -d "$BIN"
 
       - name: Upload build artifact
-        if: steps.c-sanity-check.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: minke-android-arm64
-          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+          path: |
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
           if-no-files-found: error
 
       - name: Create prerelease
-        if: steps.c-sanity-check.outcome == 'success' && success()
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-build-${{ github.run_number }}
           name: Minke Android build ${{ github.run_number }}
           prerelease: true
-          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+          files: |
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
+            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
