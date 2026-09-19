@@ -17,8 +17,6 @@ jobs:
         with:
           submodules: recursive
 
-      # Locate the Makefile by content rather than assuming its path. PREPROCESSOR_SRC is
-      # a variable name unique to Minke's Makefile.
       - name: Locate Minke Makefile
         id: locate-makefile
         run: |
@@ -39,15 +37,6 @@ jobs:
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
           make evalfile
 
-      # preprocess_nnue.cpp only needs two plain compile-time constants from simd.h
-      # (PACKUS_LANE_COUNT, PACKUS_LANE_ORDER) -- it never executes a real NEON
-      # instruction (permute_network_ft_params's only NEON-gated block is dead code
-      # when PACKUS_LANE_COUNT == 1). But the real simd.h unconditionally pulls in
-      # eval/nnue/simd/neon.h, which includes <arm_neon.h> and declares real ARM-only
-      # types -- so it can't be compiled by a host x86_64 compiler at all, regardless of
-      # which -D flags are passed. This stand-in header supplies just the two constants
-      # the tool actually uses, found first via include-path priority (-I placed before
-      # the real src/), so the real simd.h with its ARM types is never reached.
       - name: Create host-side stand-in simd.h
         id: host-stub
         run: |
@@ -63,12 +52,6 @@ jobs:
           EOF
           echo "stub_dir=$STUB_DIR" >> "$GITHUB_OUTPUT"
 
-      # Compiled and run entirely on the host (plain Ubuntu g++) -- no QEMU, no Android
-      # toolchain, no static-linking/Bionic concerns at all. Output filename is hardcoded
-      # to match exactly what the NDK cross-compile phase below will look for:
-      # $(basename EVALFILE)_processed_$(DEFAULT_TARGET).nnue, where DEFAULT_TARGET falls
-      # back to "native" whenever $(CXX) doesn't report x86 AVX macros -- true for the NDK
-      # cross-compiler used in the next step, confirmed by earlier build logs.
       - name: Build and run preprocess_nnue (host-native)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
@@ -95,16 +78,7 @@ jobs:
           ls "$TOOLCHAIN_BIN" | grep "aarch64-linux-android24-clang++"
           "$TOOLCHAIN_BIN/aarch64-linux-android24-clang++" --version
 
-      # minke41_processed_native.nnue already exists from the host-native step above, and
-      # the Makefile's evalfile_processed guard (see the patched Makefile) skips
-      # recompiling/rerunning the tool when that file is already present -- so this
-      # invocation goes straight to compiling $(OBJECTS) and linking the real engine with
-      # the NDK cross-compiler, never touching preprocess_nnue.cpp again.
-      #
-      # Linked normally (dynamic, but still PIE, which NDK clang produces by default) --
-      # not -static-pie -- since DroidFish only needs libc++_shared.so bundled alongside
-      # the binary (next step), avoiding the dl_iterate_phdr/static-libunwind issue
-      # entirely for this binary.
+      # Statically link libc++ via -static-libstdc++ while keeping Bionic libc dynamic
       - name: Build Minke (arm64, armv8-a)
         run: |
           cd "${{ steps.locate-makefile.outputs.makefile_dir }}"
@@ -113,35 +87,22 @@ jobs:
             ARCH_FLAGS="-DUSE_NEON -DUSE_SIMD -march=armv8-a" \
             BUILD_DIR=build/android \
             EXE=minke-android \
-            LDFLAGS="-flto=auto"
+            LDFLAGS="-flto=auto -static-libstdc++"
 
-      # DroidFish executes the engine directly with no way to set LD_LIBRARY_PATH -- NDK
-      # executables get a $ORIGIN-relative runpath by default specifically so a co-located
-      # shared library is found without it. Both files must be placed in the same
-      # directory on-device.
-      - name: Copy libc++_shared.so alongside the binary
-        run: |
-          LIBCXX=$(find "${{ steps.setup-ndk.outputs.ndk-path }}" -iname "libc++_shared.so" -path "*aarch64*" | head -n1)
-          echo "Found libc++_shared.so at: $LIBCXX"
-          cp "$LIBCXX" "${{ steps.locate-makefile.outputs.makefile_dir }}/"
-
-      - name: Confirm binary is PIE and check its library dependencies
+      - name: Confirm binary is self-contained PIE
         run: |
           BIN="${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android"
-          find "${{ steps.locate-makefile.outputs.makefile_dir }}" -maxdepth 1 -iname "minke*" -type f
           file "$BIN"
-          echo "--- ELF header type (should be DYN -- a normal PIE executable) ---"
+          echo "--- ELF header type (should be DYN) ---"
           readelf -h "$BIN" | grep -i type
-          echo "--- Dynamic section (libc++_shared.so expected; confirm RUNPATH includes \$ORIGIN) ---"
+          echo "--- Dynamic section (libc++_shared.so should be ABSENT) ---"
           readelf -d "$BIN"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: minke-android-arm64
-          path: |
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
+          path: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
           if-no-files-found: error
 
       - name: Create prerelease
@@ -151,8 +112,6 @@ jobs:
           tag_name: android-build-${{ github.run_number }}
           name: Minke Android build ${{ github.run_number }}
           prerelease: true
-          files: |
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
-            ${{ steps.locate-makefile.outputs.makefile_dir }}/libc++_shared.so
+          files: ${{ steps.locate-makefile.outputs.makefile_dir }}/minke-android
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
