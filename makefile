@@ -128,11 +128,21 @@ endif
 .PHONY: all evalfile native avx2 bmi2 avx512 apple-silicon build clean
 all: $(DEFAULT_TARGET)
 
+# Guarded: if the processed net file already exists (e.g. produced by a prior, separate
+# invocation -- such as a host-native pre-processing pass ahead of a cross-compile build),
+# skip recompiling and rerunning the tool. evalfile_processed is not declared .PHONY and
+# doesn't correspond to a real file of that name, so without this guard Make always treats
+# it as out of date and reruns it unconditionally on every invocation, including ones where
+# the correct output already exists from an earlier, differently-configured run.
 evalfile_processed: evalfile
-	@echo "Compiling nnue pre-processor program"
-	$(CXX) $(CXXFLAGS) $(ARCH_FLAGS) $(PROFILE_FLAGS) $(LDFLAGS) $(PREPROCESSOR_SRC) -o preprocess_nnue
-	@echo "Pre-processing $(NNUE_FILE_PREPROCESS)"
-	./preprocess_nnue $(NNUE_FILE_PREPROCESS) $(NNUE_FILE_PROCESSED)
+	@if [ -f "$(NNUE_FILE_PROCESSED)" ]; then \
+		echo "Using existing processed network: $(NNUE_FILE_PROCESSED)"; \
+	else \
+		echo "Compiling nnue pre-processor program"; \
+		$(CXX) $(CXXFLAGS) $(ARCH_FLAGS) $(PROFILE_FLAGS) $(LDFLAGS) $(PREPROCESSOR_SRC) -o preprocess_nnue; \
+		echo "Pre-processing $(NNUE_FILE_PREPROCESS)"; \
+		./preprocess_nnue $(NNUE_FILE_PREPROCESS) $(NNUE_FILE_PROCESSED); \
+	fi
 
 evalfile:
 	@if [ ! -f $(NNUE_FILE_PREPROCESS) ]; then \
