@@ -538,6 +538,22 @@ void Position::unmake_null_move() {
     change_side();
 }
 
+HashType Position::estimated_key_after(const Move move) const {
+    const Square from = move.from();
+    const Square to = move.to();
+    const Piece piece = piece_at(from);
+    const Piece captured = piece_at(to);
+
+    HashType key = hash() ^ Zobrist::color_key();
+    key ^= Zobrist::piece_square_key({piece, from}) ^ Zobrist::piece_square_key({piece, to});
+
+    if (captured != EMPTY) {
+        key ^= Zobrist::piece_square_key({captured, to});
+    }
+
+    return key;
+}
+
 void Position::calculate_aux_bbs() {
     Color adversary = nstm();
     Square ksq = king_sq(m_stm);
@@ -601,6 +617,7 @@ void Position::calculate_hashes() {
     board_s.pawn_hash = 0ull;
     board_s.white_non_pawn_hash = 0ull;
     board_s.black_non_pawn_hash = 0ull;
+    board_s.major_pieces_hash = 0ull;
 
     for (int sqi = a1; sqi <= h8; sqi++) {
         const Square sq = static_cast<Square>(sqi);
@@ -1041,6 +1058,10 @@ void Position::hash_piece_key(const PieceSquare ps) {
     } else {
         assert(get_color(ps.piece) == BLACK);
         board_state().black_non_pawn_hash ^= psq_key;
+    }
+
+    if (get_piece_type(ps.piece) == QUEEN || get_piece_type(ps.piece) == ROOK) { // is major piece
+        board_state().major_pieces_hash ^= psq_key;
     }
 }
 

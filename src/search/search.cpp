@@ -30,6 +30,7 @@
 #include "core/move.h"
 #include "core/position.h"
 #include "core/types.h"
+#include "core/zobrist.h"
 #include "eval/eval.h"
 #include "search/movepicker.h"
 #include "search/tt.h"
@@ -334,7 +335,7 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
 
     // Clean excluded and killer moves for the next ply
     td.search_stack[ply + 1].excluded_move = Move::none();
-    td.search_history.clear_killers(ply + 1);
+    td.search_history.clear_killer(ply + 1);
 
     const bool improving = [&]() -> bool {
         if (in_check)
@@ -394,10 +395,11 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
             && eval >= beta                               //
             && node.static_eval >= beta + nmp_beta_margin //
         ) {
+            m_tt.prefetch(position.hash() ^ Zobrist::color_key());
+
             const int reduction = (nmp_base_reduction() + depth * nmp_depth_factor()) / 64;
 
             make_null_move(td);
-            m_tt.prefetch(position.hash());
             node.curr_pmove = PieceMove::none();
             const ScoreType null_score = -negamax(td, -beta, -beta + 1, depth - reduction, ply + 1, !cutnode);
             unmake_null_move(td);
@@ -423,10 +425,9 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
                     continue;
                 }
 
+                m_tt.prefetch(position.estimated_key_after(move));
                 node.curr_pmove = {move, position.piece_at(move.from())};
                 make_move(td, move);
-
-                m_tt.prefetch(position.hash());
 
                 int pc_score = -quiescence(td, -pc_beta, -pc_beta + 1, ply + 1);
                 if (pc_score >= pc_beta)
@@ -512,8 +513,6 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
             const ScoreType singular_beta = ttscore - depth * singular_extension_depth_factor() / 16;
             const ScoreType singular_depth = (depth - 1) / 2;
 
-            m_tt.prefetch(position.hash());
-
             td.search_stack[ply].excluded_move = ttmove;
             const ScoreType singular_score =
                 negamax(td, singular_beta - 1, singular_beta, singular_depth, ply, cutnode);
@@ -534,10 +533,10 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
             }
         }
 
+        m_tt.prefetch(position.estimated_key_after(move));
         node.curr_pmove = {move, position.piece_at(move.from())};
         make_move(td, move);
 
-        m_tt.prefetch(position.hash());
         int new_depth = depth + extension - 1;
 
         // Add move to tried list
@@ -564,9 +563,6 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
 
                 scaled_reduction += !improving * lmr_non_improving_delta(); // Reduce more if not improving
                 scaled_reduction += cutnode * lmr_cutnode_delta();          // Reduce cutnodes more
-
-                // Reduce less if move is killer
-                scaled_reduction -= td.search_history.is_killer(move, ply) * lmr_killer_delta();
 
                 // Reduce less if this move is or was a principal variation
                 scaled_reduction -= ttpv * lmr_ttpv_delta();
@@ -733,8 +729,8 @@ ScoreType Engine::quiescence(ThreadData &td, ScoreType alpha, ScoreType beta, Co
                 continue;
             }
         }
+        m_tt.prefetch(position.estimated_key_after(move));
         make_move(td, move);
-        m_tt.prefetch(position.hash());
 
         ++moves_searched;
         const ScoreType score = -quiescence(td, -beta, -alpha, ply + 1);
