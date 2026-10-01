@@ -60,8 +60,18 @@ jobs:
             -I src \
             -DUSE_SIMD -DUSE_NEON \
             tools/preprocess_nnue.cpp -o preprocess_nnue
-          ./preprocess_nnue minke41.nnue minke41_processed_native.nnue
-          ls -la minke41_processed_native.nnue
+
+          # Dynamically detect the downloaded network file
+          INPUT_NNUE=$(ls *.nnue 2>/dev/null | grep -v "_processed" | head -n1)
+          if [ -z "$INPUT_NNUE" ]; then
+            echo "ERROR: No .nnue file found after running make evalfile"
+            exit 1
+          fi
+          OUTPUT_NNUE="${INPUT_NNUE%.nnue}_processed_native.nnue"
+
+          echo "Preprocessing network file: $INPUT_NNUE -> $OUTPUT_NNUE"
+          ./preprocess_nnue "$INPUT_NNUE" "$OUTPUT_NNUE"
+          ls -la "$OUTPUT_NNUE"
 
       - name: Set up Android NDK
         id: setup-ndk
