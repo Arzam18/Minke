@@ -37,6 +37,7 @@
 #include "uci/tune.h"
 
 namespace minke {
+using namespace minke::tunable;
 
 void SearchStackEntry::init() {
     curr_pmove = PieceMove::none();
@@ -424,7 +425,8 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
         // Prob Cut
         const ScoreType pc_beta =
             std::min(beta + probcut_margin() - probcut_improving_margin() * improving, MATE_FOUND - 1);
-        if (depth >= probcut_min_depth()                                                        //
+        if (cutnode &&                                                                          //
+            depth >= probcut_min_depth()                                                        //
             && !is_decisive(beta)                                                               //
             && (!tthit || ttdepth < depth - 3 || (ttscore != SCORE_NONE && ttscore >= pc_beta)) //
         ) {
@@ -733,15 +735,6 @@ ScoreType Engine::quiescence(ThreadData &td, ScoreType alpha, ScoreType beta, Co
         if (!is_mated(best_score)) {
             if (moves_searched >= 3) // late move pruning
                 break;
-
-            const ScoreType futility = node.static_eval + qs_futility_margin();
-            if (!in_check                  //
-                && futility <= alpha       //
-                && !SEE(position, move, 1) //
-            ) {
-                best_score = std::max(best_score, futility);
-                continue;
-            }
         }
         m_tt.prefetch(position.estimated_key_after(move));
         make_move(td, move);
