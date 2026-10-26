@@ -510,7 +510,8 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
             const CounterType lmr_depth = lmr_scaled_depth / 1024;
 
             // Late Move Pruning
-            if (moves_searched > LMP_TABLE[improving][std::min(depth, LMP_DEPTH - 1)]) {
+            if (!pv_node && //
+                moves_searched > LMP_TABLE[improving][std::min(depth, LMP_DEPTH - 1)]) {
                 skip_quiets = true;
             }
 
@@ -563,9 +564,12 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
             td.search_stack[ply].excluded_move = Move::none();
 
             if (singular_score < singular_beta) {
+                int double_margin = double_extension_base() + double_extension_pv_factor() * pv_node;
+                int triple_margin = triple_extension_base();
+
                 extension = 1;
-                extension += !pv_node && singular_score < singular_beta - double_extension_margin();
-                extension += !pv_node && singular_score < singular_beta - triple_ext_margin();
+                extension += singular_score < singular_beta - double_margin;
+                extension += !pv_node && singular_score < singular_beta - triple_margin;
             } else if (singular_score >= beta) { // Multi-Cut
                 return singular_score;
             } else if (ttscore >= beta) {
@@ -613,7 +617,9 @@ ScoreType Engine::negamax(ThreadData &td, ScoreType alpha, ScoreType beta, Count
                     scaled_reduction -= ttpv * lmr_ttpv_delta();
 
                     // Reduce based on correction history.
-                    scaled_reduction -= complexity / lmr_corrhist_divisor();
+                    scaled_reduction -= std::min(complexity * 1024 / lmr_corrhist_divisor(), 2048); // capped at 2 plies
+
+                    scaled_reduction += lmr_ttmove_noisy_reduction() * (!ttmove.is_none() && ttmove.is_noisy());
                 } else {
                     scaled_reduction += cutnode * lmr_noisy_cutnode_delta(); // Reduce cutnodes more
                 }
